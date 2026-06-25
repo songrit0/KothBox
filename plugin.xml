@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<plugin>
+  <name>KothBox</name>
+  <version>1.0.0</version>
+  <author>KothBox Team</author>
+  <description>King of the Hill dome PVP event plugin</description>
+  <website>https://github.com/songrit0</website>
+</plugin>
