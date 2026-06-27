@@ -309,18 +309,20 @@ namespace KothBox
 
             float remain = _currentState == EventState.Warmup
                 ? Mathf.Max(0, Configuration.Instance.WarmupDuration - _stateTimer)
-                : Mathf.Max(0, Configuration.Instance.EventDuration - _stateTimer);
+                : Mathf.Max(0, _activeDuration - _stateTimer);
             string stage = _currentState == EventState.Warmup ? "WARMUP" : "FIGHT";
+            int remSec = Mathf.CeilToInt(remain);
+            string remStr = $"{remSec / 60:D2}:{remSec % 60:D2}";
 
             // Scoreboard (same for everyone): player name + kills, ranked by kills then time.
             var board = _eventState.Participants
-                .OrderByDescending(p => p.Kills).ThenByDescending(p => p.CumulativeSeconds).Take(8).ToList();
+                .OrderByDescending(p => p.Kills).ThenByDescending(p => p.CumulativeSeconds).Take(5).ToList();
             var sb = new System.Text.StringBuilder();
             for (int i = 0; i < board.Count; i++)
             {
                 var sp = PlayerTool.getSteamPlayer(new Steamworks.CSteamID(board[i].SteamId));
                 string nm = sp?.playerID.characterName ?? board[i].SteamId.ToString();
-                if (nm.Length > 14) nm = nm.Substring(0, 14);
+                if (nm.Length > 12) nm = nm.Substring(0, 12);
                 sb.AppendLine($"{i + 1}. {nm}  {board[i].Kills}k");
             }
             string scoreboard = sb.ToString();
@@ -337,7 +339,7 @@ namespace KothBox
 
                 EffectManager.sendUIEffectText(HudKey, tc, true, "Koth_Rank", "#" + (i + 1) + " / " + rankedByTime.Count);
                 EffectManager.sendUIEffectText(HudKey, tc, true, "Koth_MyTime", Mathf.FloorToInt(part.CumulativeSeconds) + "s");
-                EffectManager.sendUIEffectText(HudKey, tc, true, "Koth_Countdown", stage + " " + Mathf.CeilToInt(remain) + "s");
+                EffectManager.sendUIEffectText(HudKey, tc, true, "Koth_Countdown", stage + " " + remStr);
                 EffectManager.sendUIEffectText(HudKey, tc, true, "Koth_Pool", "Pool " + _prizePool);
                 EffectManager.sendUIEffectText(HudKey, tc, true, "Koth_Fee", "Fee " + _eventEntryFee);
                 EffectManager.sendUIEffectText(HudKey, tc, true, "Koth_Scoreboard", scoreboard);
@@ -362,12 +364,17 @@ namespace KothBox
                     else
                     {
                         var next = streakCfg
-                            .Where(s => s.Kills > part.Kills)
+                            .Where(s => s.Kills > part.StreakKills)
                             .OrderBy(s => s.Kills)
                             .FirstOrDefault();
-                        streakText = next != null
-                            ? $"Kills {part.Kills} | Next: {next.Kills} kills → {GetItemName(next.ItemId)}"
-                            : $"Kills {part.Kills} ★ Max streak!";
+                        if (next != null)
+                        {
+                            string nm = GetItemName(next.ItemId);
+                            if (nm.Length > 12) nm = nm.Substring(0, 12);
+                            streakText = $"{part.StreakKills} kill\n>{next.Kills}: {nm}";
+                        }
+                        else
+                            streakText = $"{part.StreakKills} kill\n★ MAX";
                     }
                     EffectManager.sendUIEffectText(HudKey, tc, true, "Koth_Streak", streakText);
                 }

@@ -138,7 +138,7 @@ namespace KothBoxEditor
             var fee = NewText("Koth_Fee", panel.transform, "Fee 0", 37, FontStyle.Bold, TextAnchor.MiddleCenter, Color.white);
             Anchor(fee.rectTransform, 0.50f, 0.74f, 0.96f, 0.81f);
 
-            // Scoreboard: player names + kills (server pushes a multi-line string).
+            // Scoreboard: top-5 kills (server pushes multi-line string, 5 rows max).
             var sbCap = NewText("ScoreCap", panel.transform, "PLAYERS — KILLS", 36, FontStyle.Bold, TextAnchor.MiddleLeft, new Color(0.8f,0.8f,0.85f,1f));
             Anchor(sbCap.rectTransform, 0.06f, 0.67f, 0.96f, 0.73f);
             var board = NewText("Koth_Scoreboard", panel.transform, "", 38, FontStyle.Bold, TextAnchor.UpperLeft, Color.white);
@@ -146,18 +146,26 @@ namespace KothBoxEditor
             board.verticalOverflow = VerticalWrapMode.Overflow;
             board.resizeTextForBestFit = false;
             board.lineSpacing = 1.05f;
-            Anchor(board.rectTransform, 0.06f, 0.11f, 0.96f, 0.66f);
+            Anchor(board.rectTransform, 0.06f, 0.20f, 0.96f, 0.66f);
 
-            // Kill streak progress / banner (server pushes "Kills 2 | Next: 3→Medkit" or "★ 3 KILLS!").
-            var streak = NewText("Koth_Streak", panel.transform, "", 36, FontStyle.Bold, TextAnchor.MiddleCenter, Gold);
-            streak.horizontalOverflow = HorizontalWrapMode.Overflow;
-            Anchor(streak.rectTransform, 0.04f, 0.01f, 0.96f, 0.10f);
+            // Kill streak section: dark sub-panel + 2-line text ("N kill\n>X: item").
+            var streakBg = NewRound("Streak_Bg", panel.transform, new Color(0.08f, 0.10f, 0.13f, 0.85f));
+            AddOutline(streakBg, new Color(1f, 0.75f, 0.15f, 0.25f)); // faint gold border
+            Anchor(streakBg.rectTransform, 0.04f, 0.01f, 0.96f, 0.18f);
 
-            // Prep room button — shown during Warmup only (same slot as Streak; server swaps them).
-            var prepBtn = MakeButton("Koth_PrepBtn", panel.transform, "GO TO PREP ROOM",
+            var streak = NewText("Koth_Streak", streakBg.transform, "", 34, FontStyle.Bold, TextAnchor.MiddleCenter, Gold);
+            streak.horizontalOverflow = HorizontalWrapMode.Wrap;
+            streak.verticalOverflow   = VerticalWrapMode.Overflow;
+            streak.resizeTextForBestFit = true;
+            streak.resizeTextMinSize = 8;
+            streak.resizeTextMaxSize = 34;
+            Stretch(streak.rectTransform);
+
+            // Prep room button — inside streakBg, same space as Koth_Streak (server swaps visibility).
+            var prepBtn = MakeButton("Koth_PrepBtn", streakBg.transform, "GO TO PREP ROOM",
                 new Color(0.10f, 0.22f, 0.12f, 1f), new Color(0.30f, 0.92f, 0.40f, 1f),
                 37, "Label", new Color(0.30f, 0.92f, 0.40f, 1f));
-            Anchor((RectTransform)prepBtn.transform, 0.04f, 0.01f, 0.96f, 0.10f);
+            Stretch((RectTransform)prepBtn.transform);
 
             // ---- Kill flash (hidden by default, shown 2.5s after each kill) ----
             var kcGo = new GameObject("Koth_KillCounter", typeof(RectTransform));

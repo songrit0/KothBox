@@ -135,7 +135,6 @@ namespace KothBox
             Rocket.Unturned.Events.UnturnedPlayerEvents.OnPlayerDead += OnPlayerDead; // death backstop
             EffectManager.onEffectButtonClicked += OnUIClick; // Phase 8: loadout UI clicks
             ItemManager.onServerSpawningItemDrop += OnServerSpawningItemDrop; // block dropping in the arena
-            PlayerLife.onPlayerDied += OnPlayerKilled;
 
             // Phase 3.5: Harmony patch to block escape commands during an event.
             try
@@ -230,7 +229,6 @@ namespace KothBox
             Rocket.Unturned.Events.UnturnedPlayerEvents.OnPlayerDead -= OnPlayerDead;
             EffectManager.onEffectButtonClicked -= OnUIClick;
             ItemManager.onServerSpawningItemDrop -= OnServerSpawningItemDrop;
-            PlayerLife.onPlayerDied -= OnPlayerKilled;
             Level.onLevelLoaded -= OnLevelLoaded;
             ClearWall(); // tidy up the arena wall on plugin unload/reload
             try { _harmony?.UnpatchAll("com.kothbox.plugin"); } catch { }
@@ -308,17 +306,6 @@ namespace KothBox
                 RespawnInDome(player.Player, participant);
             }
             catch (Exception ex) { Rocket.Core.Logging.Logger.LogException(ex, "[KothBox] death backstop"); }
-        }
-
-        private void OnPlayerKilled(PlayerLife victim, EDeathCause cause, ELimb limb, CSteamID killer)
-        {
-            if (_currentState != EventState.Active) return;
-            var killerId = killer.m_SteamID;
-            if (killerId == 0 || killerId == victim.player.channel.owner.playerID.steamID.m_SteamID) return;
-            if (GetParticipant(killerId) == null) return;
-            byte amount = Configuration.Instance.KillHealAmount;
-            if (amount == 0) return;
-            _pendingHeal[killerId] = (_pendingHeal.TryGetValue(killerId, out int cur) ? cur : 0) + amount;
         }
 
         public override TranslationList DefaultTranslations => new TranslationList();
@@ -666,12 +653,12 @@ namespace KothBox
                 }
             }
 
-            // Kill-heal: tick every 1 second
+            // Kill-heal: tick every 0.25s for smooth Healing Factor regen
             _healTickTimer += dt;
-            if (_healTickTimer >= 1f && _pendingHeal.Count > 0)
+            if (_healTickTimer >= 0.25f && _pendingHeal.Count > 0)
             {
                 _healTickTimer = 0f;
-                byte tick = Configuration.Instance.KillHealTickAmount;
+                byte tick = (byte)Math.Max(1, Configuration.Instance.KillHealTickAmount / 4);
                 var done = new List<ulong>();
                 foreach (var kv in new Dictionary<ulong, int>(_pendingHeal))
                 {
@@ -685,7 +672,7 @@ namespace KothBox
                 }
                 foreach (var id in done) _pendingHeal.Remove(id);
             }
-            else if (_healTickTimer >= 1f)
+            else if (_healTickTimer >= 0.25f)
             {
                 _healTickTimer = 0f;
             }
@@ -1418,6 +1405,14 @@ namespace KothBox
         {
             var killer = GetParticipant(killerId.m_SteamID);
             if (killer != null) { killer.Kills++; killer.StreakKills++; }
+
+            // Kill-heal: queue HP regen for the killer (damage is cancelled so onPlayerDied never fires).
+            byte healAmt = Configuration.Instance.KillHealAmount;
+            if (healAmt > 0 && killer != null)
+            {
+                ulong kid = killerId.m_SteamID;
+                _pendingHeal[kid] = (_pendingHeal.TryGetValue(kid, out int cur) ? cur : 0) + healAmt;
+            }
 
             // Kill flash UI (shown 2.5s then auto-hides in UpdateHuds).
             var killerPl = PlayerTool.getPlayer(killerId);
