@@ -13,10 +13,12 @@ namespace KothBox
         public string Help => "Set a new PVP box at your current position.";
         public string Syntax => "<name> <radius>";
         public List<string> Aliases => new List<string>();
-        public List<string> Permissions => new List<string> { "kothbox.admin" };
+        public List<string> Permissions => new List<string>();
 
         public void Execute(IRocketPlayer caller, string[] command)
         {
+            if (!Rocket.Core.R.Permissions.HasPermission(caller, new List<string> { "kothbox.admin" }))
+            { UnturnedChat.Say(caller, "[PVP] ไม่มีสิทธิ์", Color.red); return; }
             if (command.Length < 2)
             {
                 UnturnedChat.Say(caller, "Syntax: /setkothbox <name> <radius>", Color.red);

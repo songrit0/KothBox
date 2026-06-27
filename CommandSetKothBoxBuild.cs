@@ -15,10 +15,12 @@ namespace KothBox
         public string Help => "Link an AdminBarricade saved build to a KOTH box.";
         public string Syntax => "<boxname> <buildname|->";
         public List<string> Aliases => new List<string> { "skbb" };
-        public List<string> Permissions => new List<string> { "kothbox.admin" };
+        public List<string> Permissions => new List<string>();
 
         public void Execute(IRocketPlayer caller, string[] command)
         {
+            if (!Rocket.Core.R.Permissions.HasPermission(caller, new List<string> { "kothbox.admin" }))
+            { UnturnedChat.Say(caller, "[PVP] ไม่มีสิทธิ์", Color.red); return; }
             if (command.Length < 2)
             {
                 UnturnedChat.Say(caller, "ใช้: /setkothboxbuild <boxname> <buildname|-> (-=ยกเลิก)", Color.yellow);

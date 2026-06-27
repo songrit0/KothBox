@@ -13,10 +13,12 @@ namespace KothBox
         public string Help => "Preview a PVP box with a ring effect.";
         public string Syntax => "<name>";
         public List<string> Aliases => new List<string>();
-        public List<string> Permissions => new List<string> { "kothbox.admin" };
+        public List<string> Permissions => new List<string>();
 
         public void Execute(IRocketPlayer caller, string[] command)
         {
+            if (!Rocket.Core.R.Permissions.HasPermission(caller, new List<string> { "kothbox.admin" }))
+            { UnturnedChat.Say(caller, "[PVP] ไม่มีสิทธิ์", Color.red); return; }
             if (command.Length < 1)
             {
                 UnturnedChat.Say(caller, "Syntax: /previewkothbox <name>", Color.red);

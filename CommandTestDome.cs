@@ -16,10 +16,12 @@ namespace KothBox
         public string Help => "Spawn an effect at your position to test rendering.";
         public string Syntax => "<effectId>";
         public List<string> Aliases => new List<string>();
-        public List<string> Permissions => new List<string> { "kothbox.admin" };
+        public List<string> Permissions => new List<string>();
 
         public void Execute(IRocketPlayer caller, string[] command)
         {
+            if (!Rocket.Core.R.Permissions.HasPermission(caller, new List<string> { "kothbox.admin" }))
+            { UnturnedChat.Say(caller, "[PVP] ไม่มีสิทธิ์", Color.red); return; }
             var player = (UnturnedPlayer)caller;
             ushort id = 30062;
             if (command.Length > 0) ushort.TryParse(command[0], out id);

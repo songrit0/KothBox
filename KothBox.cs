@@ -40,6 +40,12 @@ namespace KothBox
         private uint _eventEntryFee;
         private bool _suppressItemDrops = false;
 
+        // Spectator mode
+        private readonly HashSet<ulong> _spectators = new HashSet<ulong>();
+        private readonly Dictionary<ulong, Vector3> _spectatorOrigins = new Dictionary<ulong, Vector3>();
+        private Vector3? _spectatorSpot;
+        private string SpectatorSpotPath => System.IO.Path.Combine(Environment.CurrentDirectory, "Rocket", "Plugins", "KothBox", "spectator_spot.txt");
+
         // General item image URL cache (itemId → url from sv_items.image_url), loaded in background.
         internal readonly Dictionary<ushort, string> _itemImageUrls = new Dictionary<ushort, string>();
 
@@ -118,10 +124,13 @@ namespace KothBox
                 });
             }
 
+            LoadSpectatorSpot();
+
             // Hook events
             DamageTool.damagePlayerRequested += OnDamagePlayerRequested;
             BarricadeManager.onDamageBarricadeRequested += OnDamageBarricadeRequested;
             Rocket.Unturned.U.Events.OnPlayerConnected += OnPlayerConnected;
+            Rocket.Unturned.U.Events.OnPlayerDisconnected += OnPlayerDisconnected;
             Rocket.Unturned.Events.UnturnedPlayerEvents.OnPlayerDead += OnPlayerDead; // death backstop
             EffectManager.onEffectButtonClicked += OnUIClick; // Phase 8: loadout UI clicks
             ItemManager.onServerSpawningItemDrop += OnServerSpawningItemDrop; // block dropping in the arena
@@ -216,6 +225,7 @@ namespace KothBox
             DamageTool.damagePlayerRequested -= OnDamagePlayerRequested;
             BarricadeManager.onDamageBarricadeRequested -= OnDamageBarricadeRequested;
             Rocket.Unturned.U.Events.OnPlayerConnected -= OnPlayerConnected;
+            Rocket.Unturned.U.Events.OnPlayerDisconnected -= OnPlayerDisconnected;
             Rocket.Unturned.Events.UnturnedPlayerEvents.OnPlayerDead -= OnPlayerDead;
             EffectManager.onEffectButtonClicked -= OnUIClick;
             ItemManager.onServerSpawningItemDrop -= OnServerSpawningItemDrop;
@@ -417,12 +427,16 @@ namespace KothBox
             SpawnWall(box);   // ring of barricades = visible arena boundary
             if (!string.IsNullOrEmpty(box.BuildName)) LoadBoxBuild(box.BuildName);
 
-            UnturnedChat.Say($"[PVP] Event เริ่มใน {Configuration.Instance.WarmupDuration}s — ค่าเข้า {_eventEntryFee} XP | Event starting in {Configuration.Instance.WarmupDuration}s — entry fee {_eventEntryFee} XP.");
+            UnturnedChat.Say($"[PVP] Event เริ่มใน {Configuration.Instance.WarmupDuration}s — ค่าเข้า {_eventEntryFee} XP — พิมพ์ /jkoth เพื่อเข้าร่วม | Event starting in {Configuration.Instance.WarmupDuration}s — fee {_eventEntryFee} XP — type /jkoth to join.", Color.yellow);
         }
 
         public void StopEvent()
         {
             if (_currentState == EventState.Idle) return;
+
+            // Return spectators to their origins before clearing state
+            foreach (var sid in new List<ulong>(_spectators))
+                ReturnSpectator(sid);
 
             ClearAllHuds();
             RestoreAllParticipants();
@@ -557,6 +571,7 @@ namespace KothBox
             {
                 // Every frame: keep participants inside the dome (warp back if they leave).
                 ContainParticipants();
+                RefillParticipantOxygen(); // every frame to outpace zone oxygen drain
 
                 _domeRenderTimer += dt;
                 if (_domeRenderTimer >= 1f)
@@ -597,6 +612,28 @@ namespace KothBox
         {
             if (_stateTimer >= Configuration.Instance.WarmupDuration)
             {
+                // ผู้เล่นน้อยกว่า 2 คน → ยกเลิก คืน XP
+                if (_eventState.Participants.Count < 2)
+                {
+                    if (_eventEntryFee > 0)
+                    {
+                        foreach (var part in _eventState.Participants)
+                        {
+                            bool partIsHost = _eventHostId != 0 && part.SteamId == _eventHostId;
+                            if (partIsHost) continue;
+                            var p = PlayerTool.getPlayer(new CSteamID(part.SteamId));
+                            if (p == null) continue;
+                            p.skills.ServerModifyExperience((int)_eventEntryFee);
+                            var up2 = UnturnedPlayer.FromPlayer(p);
+                            if (up2 != null) UnturnedChat.Say(up2, $"[PVP] คืน {_eventEntryFee} XP — ผู้เล่นน้อยเกินไป", Color.yellow);
+                        }
+                    }
+                    _prizePool = 0;
+                    UnturnedChat.Say("[PVP] ยกเลิก event — ผู้เล่นน้อยเกินไป (ต้องการ ≥ 2 คน) | Event cancelled — not enough players.", Color.red);
+                    StopEvent();
+                    return;
+                }
+
                 _currentState = EventState.Active;
                 _stateTimer = 0;
                 ForceEnterDome(); // warmup หมด → วาปทุกคนในห้อง prep เข้า dome
@@ -780,6 +817,16 @@ namespace KothBox
         }
 
         // Top up every participant's spare magazines to full so the arena never runs dry.
+        private void RefillParticipantOxygen()
+        {
+            foreach (var part in _eventState.Participants)
+            {
+                var p = PlayerTool.getPlayer(new CSteamID(part.SteamId));
+                if (p?.life == null || p.life.oxygen >= 100) continue;
+                try { p.life.simulatedModifyOxygen(100f); } catch { }
+            }
+        }
+
         private void RefillMagazines()
         {
             foreach (var participant in _eventState.Participants)
@@ -840,21 +887,9 @@ namespace KothBox
 
                 var player = PlayerTool.getPlayer(new CSteamID(part.SteamId));
 
-                // XP: if pool > 1500 → queue for /claimkoth; else credit directly now.
-                bool poolBig = _prizePool > 1500;
-                if (xpTotal > 0)
-                {
-                    if (poolBig)
-                    {
-                        var existing2 = _rewards.Rewards.FirstOrDefault(r => r.SteamId == part.SteamId);
-                        if (existing2 != null) existing2.Experience += (uint)xpTotal;
-                        else _rewards.Rewards.Add(new PendingRewardData { SteamId = part.SteamId, Experience = (uint)xpTotal });
-                    }
-                    else if (player?.skills != null)
-                    {
-                        player.skills.ServerModifyExperience((int)xpTotal);
-                    }
-                }
+                // XP: แจกทันทีเสมอ — /claimkoth ใช้แค่สำหรับ item/vehicle เท่านั้น
+                if (xpTotal > 0 && player?.skills != null)
+                    player.skills.ServerModifyExperience((int)xpTotal);
 
                 // Gacha draws for this rank → queue all results for /claimkoth.
                 int draws = tier?.GachaDraws ?? 0;
@@ -895,7 +930,7 @@ namespace KothBox
                 if (sp != null) entry.PlayerName = sp.playerID.characterName;
 
                 string name = sp?.playerID.characterName ?? part.SteamId.ToString();
-                bool hasClaim = poolBig || gachaCount > 0;
+                bool hasClaim = gachaCount > 0;
                 UnturnedChat.Say($"#{i + 1} {name} — {part.CumulativeSeconds:F0}s — {xpTotal} XP"
                     + (draws > 0 ? $" + {draws} gacha" : "")
                     + (hasClaim ? " (/claimkoth)" : ""));
@@ -1199,6 +1234,74 @@ namespace KothBox
             }
         }
 
+        // --- Spectator mode ---
+        private void LoadSpectatorSpot()
+        {
+            try
+            {
+                if (!File.Exists(SpectatorSpotPath)) return;
+                var parts = File.ReadAllText(SpectatorSpotPath).Split(',');
+                if (parts.Length >= 3
+                    && float.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float x)
+                    && float.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float y)
+                    && float.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out float z))
+                    _spectatorSpot = new Vector3(x, y, z);
+            }
+            catch { }
+        }
+
+        public void SetSpectatorSpot(Vector3 pos)
+        {
+            _spectatorSpot = pos;
+            try { File.WriteAllText(SpectatorSpotPath, $"{pos.x.ToString(System.Globalization.CultureInfo.InvariantCulture)},{pos.y.ToString(System.Globalization.CultureInfo.InvariantCulture)},{pos.z.ToString(System.Globalization.CultureInfo.InvariantCulture)}"); } catch { }
+        }
+
+        public void WatchKoth(UnturnedPlayer player)
+        {
+            if (_currentState == EventState.Idle)
+            { UnturnedChat.Say(player, "[PVP] ยังไม่มี event | No event running.", Color.red); return; }
+            if (!_spectatorSpot.HasValue)
+            { UnturnedChat.Say(player, "[PVP] Admin ยังไม่ได้ตั้งจุดผู้ชม ใช้ /setkothspec", Color.red); return; }
+            ulong sid = player.CSteamID.m_SteamID;
+            if (GetParticipant(sid) != null)
+            { UnturnedChat.Say(player, "[PVP] คุณอยู่ใน event แล้ว ออกก่อนด้วย /leavekoth", Color.red); return; }
+            if (_spectators.Contains(sid))
+            { UnturnedChat.Say(player, "[PVP] คุณดูอยู่แล้ว", Color.yellow); return; }
+
+            _spectatorOrigins[sid] = player.Position;
+            _spectators.Add(sid);
+            player.Player.inventory.tryAddItem(new Item(6928, true), true);
+            player.Player.teleportToLocation(_spectatorSpot.Value, player.Rotation);
+            UnturnedChat.Say(player, "[PVP] โหมดผู้ชม — พิมพ์ /leavespec เพื่อออก", Color.cyan);
+        }
+
+        public void LeaveSpec(UnturnedPlayer player)
+        {
+            ulong sid = player.CSteamID.m_SteamID;
+            if (!_spectators.Contains(sid))
+            { UnturnedChat.Say(player, "[PVP] คุณไม่ได้อยู่ในโหมดผู้ชม", Color.red); return; }
+            ReturnSpectator(sid);
+            UnturnedChat.Say(player, "[PVP] ออกจากโหมดผู้ชมแล้ว", Color.yellow);
+        }
+
+        private void ReturnSpectator(ulong sid)
+        {
+            _spectators.Remove(sid);
+            if (_spectatorOrigins.TryGetValue(sid, out Vector3 origin))
+            {
+                _spectatorOrigins.Remove(sid);
+                var p = PlayerTool.getPlayer(new CSteamID(sid));
+                if (p != null) p.teleportToLocation(origin, p.look?.yaw ?? 0f);
+            }
+        }
+
+        private void OnPlayerDisconnected(UnturnedPlayer player)
+        {
+            ulong sid = player.CSteamID.m_SteamID;
+            _spectators.Remove(sid);
+            _spectatorOrigins.Remove(sid);
+        }
+
         private void OnDamagePlayerRequested(ref DamagePlayerParameters parameters, ref bool shouldAllow)
         {
             var victim = parameters.player;
@@ -1314,8 +1417,13 @@ namespace KothBox
 
             var killerName = PlayerTool.getSteamPlayer(killerId)?.playerID.characterName ?? "?";
             var victimName = victim.channel.owner.playerID.characterName;
-            UnturnedChat.Say($"[PVP] {killerName} ฆ่า {victimName}" +
-                             (killer != null ? $" (streak: {killer.StreakKills})" : ""), Color.yellow);
+            string killMsg = $"[PVP] {killerName} ฆ่า {victimName}" +
+                             (killer != null ? $" (streak: {killer.StreakKills})" : "");
+            foreach (var part in _eventState.Participants)
+            {
+                var partUp = UnturnedPlayer.FromCSteamID(new Steamworks.CSteamID(part.SteamId));
+                if (partUp != null) UnturnedChat.Say(partUp, killMsg, Color.yellow);
+            }
 
             // Kill streak item rewards
             if (killer == null) return;

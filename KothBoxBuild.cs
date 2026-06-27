@@ -66,6 +66,8 @@ namespace KothBox
                 foreach (var t in barricadeLines) BoxBuildSpawnBarricade(t);
 
                 Logger.Log(string.Format("[KothBox] Loaded build '{0}' at {1} r={2}", buildName, center, radius));
+                var c2 = center; var r2b = radius;
+                Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() => RefillAndActivateGenerators(c2, r2b), 1f);
             }
             catch (Exception ex) { Logger.LogException(ex, "[KothBox] LoadBoxBuild"); }
         }

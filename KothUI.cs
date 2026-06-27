@@ -69,9 +69,10 @@ namespace KothBox
             EffectManager.sendUIEffectText(GameMenuKey, tc, true, "Koth_Status", status);
 
             // Show host controls only to admins; default the selected fee.
-            bool admin = player.IsAdmin
-                || Rocket.Core.R.Permissions.HasPermission(player, new List<string> { "kothbox.admin" });
-            EffectManager.sendUIEffectVisibility(GameMenuKey, tc, true, "Koth_HostRow", admin);
+            bool canHost = player.IsAdmin
+                || Rocket.Core.R.Permissions.HasPermission(player, new List<string> { "kothbox.admin" })
+                || Rocket.Core.R.Permissions.HasPermission(player, new List<string> { "kothbox.host" });
+            EffectManager.sendUIEffectVisibility(GameMenuKey, tc, true, "Koth_HostRow", canHost);
             uint fee = _hostFee.TryGetValue(player.CSteamID.m_SteamID, out var f) ? f : Configuration.Instance.EntryFee;
             _hostFee[player.CSteamID.m_SteamID] = fee;
             EffectManager.sendUIEffectText(GameMenuKey, tc, true, "Koth_SelFee", fee.ToString());
@@ -143,6 +144,13 @@ namespace KothBox
             if (GetParticipant(player.CSteamID.m_SteamID) != null)
             {
                 UnturnedChat.Say(player, "[PVP] คุณอยู่ใน event แล้ว | You are already in the event.", Color.red);
+                return;
+            }
+
+            bool isHost = _eventHostId != 0 && player.CSteamID.m_SteamID == _eventHostId;
+            if (_eventEntryFee > 0 && !isHost && player.Experience < _eventEntryFee)
+            {
+                UnturnedChat.Say(player, $"[PVP] XP ไม่พอ (ต้องการ {_eventEntryFee} XP)", Color.red);
                 return;
             }
 

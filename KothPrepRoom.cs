@@ -194,16 +194,57 @@ namespace KothBox
                 // PrepBuildName mode: barricades are permanent (admin ran /loadbuild once).
                 // Only read the spawn point from the build header — do NOT call loadbuild again.
                 LoadPrepRoomSpawnFromBuild(buildName);
+                if (_prepRoomSpawn.HasValue)
+                {
+                    var sc = _prepRoomSpawn.Value;
+                    float sr = _prepRoomBuildRadius > 0f ? _prepRoomBuildRadius : 64f;
+                    Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() =>
+                        RefillAndActivateGenerators(sc, sr), 1f);
+                }
                 return;
             }
             if (_prepRoom == null || _prepRoom.Barricades.Count == 0) return;
             DestroyPrepRoomObjects();
             try { ItemManager.ServerClearItemsInSphere(_prepRoom.GetSpawn(), 32f); } catch { }
             SpawnPrepRoomObjects();
-            // respawn generators หลัง 1s เหมือน PrepBuildName path (ไฟฟ้าทำงาน)
             var spawnCenter = _prepRoom.GetSpawn();
             Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() =>
                 RespawnGeneratorsLast(spawnCenter, 64f), 1f);
+            Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() =>
+                RefillAndActivateGenerators(spawnCenter, 64f), 2f);
+        }
+
+        private static void RefillAndActivateGenerators(Vector3 center, float radius)
+        {
+            if (BarricadeManager.regions == null) return;
+            float r2 = radius * radius;
+            foreach (BarricadeRegion region in BarricadeManager.regions)
+            {
+                if (region?.drops == null) continue;
+                foreach (var drop in region.drops)
+                {
+                    if (drop?.model == null) continue;
+                    if ((drop.model.position - center).sqrMagnitude > r2) continue;
+                    var gen = drop.model.GetComponentInChildren<InteractableGenerator>();
+                    if (gen == null) continue;
+                    try
+                    {
+                        // state bytes: [0..1] = fuel (ushort LE), [2] = isPowered
+                        var data = drop.GetServersideData();
+                        if (data?.barricade?.state == null || data.barricade.state.Length < 3) continue;
+                        var state = (byte[])data.barricade.state.Clone();
+                        if (gen.fuel < gen.capacity)
+                            BitConverter.GetBytes(gen.capacity).CopyTo(state, 0);
+                        if (!gen.isPowered)
+                            state[2] = 1;
+                        BarricadeManager.updateReplicatedState(drop.model, state, state.Length);
+                    }
+                    catch (Exception ex)
+                    {
+                        Rocket.Core.Logging.Logger.LogException(ex, "[KothBox] RefillAndActivateGenerators");
+                    }
+                }
+            }
         }
 
         // spawn barricades + structures จาก template (ส่ง spawn packets ไปทุก client ที่ online)
@@ -369,14 +410,29 @@ namespace KothBox
             _inPrepRoom.Add(sid);
 
             Vector3 spawn = useBuild ? _prepRoomSpawn.Value : _prepRoom.GetSpawn();
-            spawn.y += 1.5f; // spawn above floor to avoid being inside structure geometry
             float yaw = up.Rotation;
-            up.Player.teleportToLocation(spawn, yaw);
-            // Refresh barricades 1s after teleport so the client (now in region) receives fresh spawn packets
+
+            // 2-step for underground rooms: step1 = surface above (client loads region),
+            // step2 = actual underground position (structures already in client's scene).
+            RaycastHit groundHit;
+            Vector3 surfaceAbove;
+            if (Physics.Raycast(new Vector3(spawn.x, spawn.y + 500f, spawn.z), Vector3.down, out groundHit, 600f, RayMasks.GROUND))
+                surfaceAbove = new Vector3(spawn.x, groundHit.point.y + 1.5f, spawn.z);
+            else
+                surfaceAbove = new Vector3(spawn.x, spawn.y + 50f, spawn.z);
+
+            up.Player.teleportToLocation(surfaceAbove, yaw);
+            var capturedPlayer = player;
+            var capturedSpawn  = spawn;
+            var capturedYaw    = yaw;
+            Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() =>
+                capturedPlayer?.teleportToLocation(capturedSpawn, capturedYaw), 0.8f);
+
+            // Refresh barricades 1.5s after final teleport so client receives fresh spawn packets
             SchedulePrepRoomRefresh();
-            // Clear dropped items 2s after teleport (after player finishes loading in)
+            // Clear dropped items 3s after teleport (after player finishes loading in)
             var plugin = this;
-            Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() => plugin.ClearPrepRoomGroundItems(), 2f);
+            Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() => plugin.ClearPrepRoomGroundItems(), 3f);
             UnturnedChat.Say(up, "[PVP] รออยู่ในห้อง Prep จนวอมอัพหมดจะเข้าสนาม PVP อัตโนมัติ", Color.cyan);
             return true;
         }

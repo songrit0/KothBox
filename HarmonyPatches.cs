@@ -3,6 +3,8 @@ using Rocket.Core.Commands;
 using Rocket.Unturned.Chat;
 using Rocket.Unturned.Player;
 using SDG.Unturned;
+using System;
+using System.Reflection;
 using UnityEngine;
 
 namespace KothBox
@@ -13,12 +15,12 @@ namespace KothBox
     public static class KothGroupOverridePatch
     {
         [HarmonyPrefix]
-        public static bool Prefix(PlayerQuests __instance, Player other, ref bool __result)
+        public static bool Prefix(PlayerQuests __instance, Player player, ref bool __result)
         {
             var plugin = KothBox.Instance;
-            if (plugin == null || other == null) return true;
+            if (plugin == null || player == null) return true;
             ulong a = __instance.player.channel.owner.playerID.steamID.m_SteamID;
-            ulong b = other.channel.owner.playerID.steamID.m_SteamID;
+            ulong b = player.channel.owner.playerID.steamID.m_SteamID;
             if (plugin.GetParticipant(a) != null && plugin.GetParticipant(b) != null)
             {
                 __result = false;
@@ -73,6 +75,52 @@ namespace KothBox
 
             UnturnedChat.Say(player, "[PVP] ห้ามใช้คำสั่งระหว่างอยู่ในสนาม PVP — พิมพ์ /leavekoth เพื่อออก", Color.red);
             return false;
+        }
+    }
+
+    // Prevent Deadbox from collecting death loot for KOTH participants.
+    [HarmonyPatch]
+    public static class DeadboxOptOutPatch
+    {
+        static MethodBase TargetMethod()
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var t = asm.GetType("Deadbox.Deadbox");
+                if (t != null) return t.GetMethod("OpenWindow", BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+            return null;
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix(ulong steamId)
+        {
+            var koth = KothBox.Instance;
+            if (koth == null) return true;
+            return koth.GetParticipant(steamId) == null;
+        }
+    }
+
+    // Prevent VaultBackpack from dropping a death box for KOTH participants.
+    [HarmonyPatch]
+    public static class VaultBackpackDeathOptOutPatch
+    {
+        static MethodBase TargetMethod()
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var t = asm.GetType("VaultBackpack.VaultBackpackPlugin");
+                if (t != null) return t.GetMethod("OnPlayerDeath", BindingFlags.NonPublic | BindingFlags.Instance);
+            }
+            return null;
+        }
+
+        [HarmonyPrefix]
+        public static bool Prefix(UnturnedPlayer player)
+        {
+            var koth = KothBox.Instance;
+            if (koth == null || player == null) return true;
+            return koth.GetParticipant(player.CSteamID.m_SteamID) == null;
         }
     }
 }

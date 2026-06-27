@@ -1,15 +1,16 @@
 using Rocket.API;
 using Rocket.Unturned.Chat;
+using Rocket.Unturned.Player;
 using System.Collections.Generic;
 using UnityEngine;
 
 namespace KothBox
 {
-    public class CommandClearPrepRoom : IRocketCommand
+    public class CommandSetKothSpec : IRocketCommand
     {
         public AllowedCaller AllowedCaller => AllowedCaller.Player;
-        public string Name => "clearpreproom";
-        public string Help => "Admin: ลบ prep room template ออก";
+        public string Name => "setkothspec";
+        public string Help => "Set the spectator viewing position for KOTH events.";
         public string Syntax => "";
         public List<string> Aliases => new List<string>();
         public List<string> Permissions => new List<string>();
@@ -18,10 +19,10 @@ namespace KothBox
         {
             if (!Rocket.Core.R.Permissions.HasPermission(caller, new List<string> { "kothbox.admin" }))
             { UnturnedChat.Say(caller, "[PVP] ไม่มีสิทธิ์", Color.red); return; }
-            var plugin = KothBox.Instance;
-            if (plugin == null) { UnturnedChat.Say(caller, "Plugin not loaded.", Color.red); return; }
-            plugin.ClearPrepRoom(out var msg);
-            UnturnedChat.Say(caller, $"[PVP] {msg}", Color.green);
+
+            var player = (UnturnedPlayer)caller;
+            KothBox.Instance?.SetSpectatorSpot(player.Position);
+            UnturnedChat.Say(caller, $"[PVP] บันทึกจุดผู้ชมที่ {player.Position:F1}", Color.green);
         }
     }
 }

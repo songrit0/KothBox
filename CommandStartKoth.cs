@@ -12,10 +12,12 @@ namespace KothBox
         public string Help => "Start a PVP event. Optionally set the entry fee.";
         public string Syntax => "<boxname|random> [entryFee]";
         public List<string> Aliases => new List<string>();
-        public List<string> Permissions => new List<string> { "kothbox.admin" };
+        public List<string> Permissions => new List<string>();
 
         public void Execute(IRocketPlayer caller, string[] command)
         {
+            if (!Rocket.Core.R.Permissions.HasPermission(caller, new List<string> { "kothbox.admin", "kothbox.host" }))
+            { UnturnedChat.Say(caller, "[PVP] ไม่มีสิทธิ์", Color.red); return; }
             if (command.Length < 1)
             {
                 UnturnedChat.Say(caller, "Syntax: /startkoth <boxname> [entryFee]", Color.red);
