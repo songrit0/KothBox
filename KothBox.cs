@@ -32,6 +32,7 @@ namespace KothBox
         private KothBoxData _activeBox;
         private ulong _eventHostId;
         private float _stateTimer;
+        private float _activeDuration;
         private float _domeRenderTimer;
         private HarmonyLib.Harmony _harmony;
         private readonly List<Transform> _wallBarricades = new List<Transform>();
@@ -636,9 +637,17 @@ namespace KothBox
 
                 _currentState = EventState.Active;
                 _stateTimer = 0;
+                int count = _eventState.Participants.Count;
+                var cfg = Configuration.Instance;
+                _activeDuration = Mathf.Min(
+                    cfg.EventDuration
+                        + count * cfg.ExtraSecondsPerPlayer
+                        + _prizePool * cfg.ExtraSecondsPerXP,
+                    cfg.MaxEventDuration > 0 ? cfg.MaxEventDuration : float.MaxValue);
                 ForceEnterDome(); // warmup หมด → วาปทุกคนในห้อง prep เข้า dome
 
-                UnturnedChat.Say("[PVP] Event เริ่มแล้ว! | Event started!");
+                int mins = Mathf.CeilToInt(_activeDuration / 60f);
+                UnturnedChat.Say($"[PVP] Event เริ่มแล้ว! {count} คน — XP pool {_prizePool} — เวลา {mins} นาที | Event started! {count} players — {_prizePool} XP pool — {mins} min.", Color.green);
             }
         }
 
@@ -682,7 +691,7 @@ namespace KothBox
             }
 
             // Check duration
-            if (_stateTimer >= Configuration.Instance.EventDuration)
+            if (_stateTimer >= _activeDuration)
             {
                 EndEvent(0);
             }

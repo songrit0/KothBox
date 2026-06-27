@@ -49,6 +49,19 @@ namespace KothBox
         [XmlElement("EventDuration")]
         public float EventDuration { get; set; }
 
+        // Extra seconds added per participant at Active start. 0 = fixed duration.
+        [XmlElement("ExtraSecondsPerPlayer")]
+        public float ExtraSecondsPerPlayer { get; set; }
+
+        // Extra seconds added per 1 XP in the prize pool at Active start. 0 = disabled.
+        // e.g. pool=300 XP * 0.5 = 150s extra.
+        [XmlElement("ExtraSecondsPerXP")]
+        public float ExtraSecondsPerXP { get; set; }
+
+        // Hard cap on computed event duration in seconds. 0 = no cap.
+        [XmlElement("MaxEventDuration")]
+        public float MaxEventDuration { get; set; }
+
         [XmlElement("WinningTime")]
         public float WinningTime { get; set; }
 
@@ -189,6 +202,9 @@ namespace KothBox
         {
             WarmupDuration = 180f;
             EventDuration = 1200f;
+            ExtraSecondsPerPlayer = 60f;
+            ExtraSecondsPerXP = 0.5f;
+            MaxEventDuration = 2100f; // 35 minutes
             WinningTime = 300f;
             DomeDamage = 15;
             EntryFee = 50;
