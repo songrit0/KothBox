@@ -31,6 +31,10 @@
       <HintPath>$(UnturnedManaged)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(UnturnedManaged)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="com.rlabrecque.steamworks.net">
       <HintPath>$(UnturnedManaged)\com.rlabrecque.steamworks.net.dll</HintPath>
       <Private>false</Private>
@@ -57,6 +61,12 @@
     <!-- Harmony for command interception -->
     <Reference Include="0Harmony">
       <HintPath>$(MSBuildProjectDirectory)\lib\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+
+    <!-- MySQL -->
+    <Reference Include="MySql.Data">
+      <HintPath>$(MSBuildProjectDirectory)\lib\MySql.Data.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

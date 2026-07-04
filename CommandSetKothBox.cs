@@ -32,6 +32,13 @@ namespace KothBox
                 UnturnedChat.Say(caller, "Radius must be a positive number.", Color.red);
                 return;
             }
+            // Clamp to a sane max: SpawnWall drops one barricade per few metres of perimeter, so a
+            // huge radius (e.g. 100000) would spawn hundreds of thousands of barricades in one frame.
+            if (radius > 500f)
+            {
+                radius = 500f;
+                UnturnedChat.Say(caller, "[PVP] Radius capped to 500.", Color.yellow);
+            }
 
             var plugin = KothBox.Instance;
             if (plugin == null)

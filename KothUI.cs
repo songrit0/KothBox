@@ -251,6 +251,16 @@ namespace KothBox
             if (button == "Koth_Join" && up != null) { ClearGameMenu(player); OpenJoinUI(up); return; }
             if (button == "Koth_Start" && up != null)
             {
+                // Server-side permission re-check: hiding Koth_HostRow client-side is not enough —
+                // a modified client can send this button. Only admins/hosts may start an event.
+                bool mayHost = up.IsAdmin
+                    || Rocket.Core.R.Permissions.HasPermission(up, new List<string> { "kothbox.admin" })
+                    || Rocket.Core.R.Permissions.HasPermission(up, new List<string> { "kothbox.host" });
+                if (!mayHost)
+                {
+                    UnturnedChat.Say(up, "[PVP] คุณไม่มีสิทธิ์เริ่ม event | You can't start an event.", Color.red);
+                    return;
+                }
                 uint fee = _hostFee.TryGetValue(steamId, out var hf) ? hf : Configuration.Instance.EntryFee;
                 ClearGameMenu(player);
                 StartEvent(Configuration.Instance.DefaultBoxName, fee, steamId);

@@ -17,6 +17,13 @@ namespace KothBox
         public string Label;
     }
 
+    // A prize + its draw weight, for an in-memory pool the caller can roll off the main thread.
+    public sealed class GachaPrizeWeighted
+    {
+        public GachaPrize Prize;
+        public double Weight;
+    }
+
     // sv_coins writer. Mirrors GameMenuDatabase.CreditCoins exactly (same table/columns).
     // Every method opens its own connection and MUST run off the main thread.
     public sealed class KothCoinsDatabase
@@ -71,15 +78,14 @@ namespace KothBox
             catch (Exception ex) { Logger.LogException(ex, "[KothBox] SpendCoins"); return false; }
         }
 
-        /// <summary>Weighted-random draw from the shop gacha pool (enabled prizes, by `weight`).
-        /// Returns null if the pool is empty/unreachable. Mirrors the shop's /draw odds.</summary>
-        public GachaPrize DrawGachaPrize()
+        /// <summary>Fetch the whole enabled gacha pool once (weights included) so the caller can
+        /// cache it and roll locally — avoids a blocking SELECT per draw on the main thread.
+        /// MUST run off the main thread. Returns an empty list on failure.</summary>
+        public List<GachaPrizeWeighted> LoadGachaPool()
         {
+            var list = new List<GachaPrizeWeighted>();
             try
             {
-                var prizes = new List<GachaPrize>();
-                var weights = new List<double>();
-                double total = 0;
                 using (var c = Open())
                 using (var cmd = new MySqlCommand(
                     "SELECT type, ref_id, amount, quality, weight, CAST(label AS BINARY) AS label " +
@@ -89,32 +95,25 @@ namespace KothBox
                     while (r.Read())
                     {
                         double w = ToDouble(r["weight"]);
-                        prizes.Add(new GachaPrize
+                        if (w <= 0) continue;
+                        list.Add(new GachaPrizeWeighted
                         {
-                            Type = ToStr(r["type"]),
-                            RefId = ToInt(r["ref_id"]),
-                            Amount = ToLong(r["amount"], 1),
-                            Quality = (byte)Math.Min(100, Math.Max(0, ToInt(r["quality"], 100))),
-                            Label = ToUtf8(r["label"], "Prize")
+                            Weight = w,
+                            Prize = new GachaPrize
+                            {
+                                Type = ToStr(r["type"]),
+                                RefId = ToInt(r["ref_id"]),
+                                Amount = ToLong(r["amount"], 1),
+                                Quality = (byte)Math.Min(100, Math.Max(0, ToInt(r["quality"], 100))),
+                                Label = ToUtf8(r["label"], "Prize")
+                            }
                         });
-                        weights.Add(w);
-                        total += w;
                     }
                 }
-                if (prizes.Count == 0 || total <= 0) return null;
-
-                double roll = _rng.NextDouble() * total;
-                for (int i = 0; i < prizes.Count; i++)
-                {
-                    roll -= weights[i];
-                    if (roll <= 0) return prizes[i];
-                }
-                return prizes[prizes.Count - 1];
             }
-            catch (Exception ex) { Logger.LogException(ex, "[KothBox] DrawGachaPrize"); return null; }
+            catch (Exception ex) { Logger.LogException(ex, "[KothBox] LoadGachaPool"); }
+            return list;
         }
-
-        private static readonly Random _rng = new Random();
 
         private static int ToInt(object o, int def = 0) => (o == null || o == DBNull.Value) ? def : Convert.ToInt32(o);
         private static long ToLong(object o, long def = 0) => (o == null || o == DBNull.Value) ? def : Convert.ToInt64(o);

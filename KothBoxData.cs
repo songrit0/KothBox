@@ -100,6 +100,12 @@ namespace KothBox
 
         [XmlElement("Participant")]
         public List<ParticipantData> Participants { get; set; } = new List<ParticipantData>();
+
+        // Players who were offline when the event ended (or at reload): their stash is still on
+        // disk, waiting to be restored on their next reconnect. Kept out of Participants so they
+        // don't accrue time / get teleported while offline.
+        [XmlElement("Pending")]
+        public List<ParticipantData> OfflinePending { get; set; } = new List<ParticipantData>();
     }
 
     [XmlRoot("PendingRewards")]

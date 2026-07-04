@@ -47,149 +47,76 @@ namespace KothBox
         private static string SafeName(string n) =>
             string.Concat((n ?? "kit").Split(Path.GetInvalidFileNameChars()));
 
+        // Crash-safe write: serialize to a temp file, then atomically swap it over the real file
+        // (keeping a .bak). A crash mid-serialize can only corrupt the temp, never the live file.
+        private static void WriteAtomic(string path, XmlSerializer ser, object obj)
+        {
+            var tmp = path + ".tmp";
+            try
+            {
+                using (var writer = new StreamWriter(tmp))
+                    ser.Serialize(writer, obj);
+                if (File.Exists(path)) File.Replace(tmp, path, path + ".bak");
+                else File.Move(tmp, path);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[KothBox] atomic write {Path.GetFileName(path)} failed: {ex.Message}");
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            }
+        }
+
+        // Read path; on a torn/parse failure fall back to the .bak from the last good write.
+        private static T ReadOrBackup<T>(string path, XmlSerializer ser) where T : class, new()
+        {
+            foreach (var p in new[] { path, path + ".bak" })
+            {
+                if (!File.Exists(p)) continue;
+                try { using (var r = new StreamReader(p)) return (T)ser.Deserialize(r) ?? new T(); }
+                catch { }
+            }
+            return new T();
+        }
+
         // --- Boxes ---
         public KothBoxList LoadBoxes()
         {
             var path = Path.Combine(_pluginDir, "kothboxes.dat");
-            if (!File.Exists(path))
-                return new KothBoxList();
-
-            try
-            {
-                using (var reader = new StreamReader(path))
-                {
-                    return (KothBoxList)_boxListSerializer.Deserialize(reader) ?? new KothBoxList();
-                }
-            }
-            catch
-            {
-                return new KothBoxList();
-            }
+            return ReadOrBackup<KothBoxList>(path, _boxListSerializer);
         }
 
         public void SaveBoxes(KothBoxList boxes)
-        {
-            var path = Path.Combine(_pluginDir, "kothboxes.dat");
-            try
-            {
-                using (var writer = new StreamWriter(path))
-                {
-                    _boxListSerializer.Serialize(writer, boxes);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[KothBox] Failed to save boxes: {ex.Message}");
-            }
-        }
+            => WriteAtomic(Path.Combine(_pluginDir, "kothboxes.dat"), _boxListSerializer, boxes);
 
         // --- Event State ---
         public KothEventState LoadState()
         {
             var path = Path.Combine(_pluginDir, "kothstate.xml");
-            if (!File.Exists(path))
-                return new KothEventState();
-
-            try
-            {
-                using (var reader = new StreamReader(path))
-                {
-                    return (KothEventState)_stateSerializer.Deserialize(reader) ?? new KothEventState();
-                }
-            }
-            catch
-            {
-                return new KothEventState();
-            }
+            return ReadOrBackup<KothEventState>(path, _stateSerializer);
         }
 
         public void SaveState(KothEventState state)
-        {
-            var path = Path.Combine(_pluginDir, "kothstate.xml");
-            try
-            {
-                using (var writer = new StreamWriter(path))
-                {
-                    _stateSerializer.Serialize(writer, state);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[KothBox] Failed to save state: {ex.Message}");
-            }
-        }
+            => WriteAtomic(Path.Combine(_pluginDir, "kothstate.xml"), _stateSerializer, state);
 
         // --- Pending Rewards ---
         public PendingRewardsList LoadRewards()
         {
             var path = Path.Combine(_pluginDir, "pendingrewards.xml");
-            if (!File.Exists(path))
-                return new PendingRewardsList();
-
-            try
-            {
-                using (var reader = new StreamReader(path))
-                {
-                    return (PendingRewardsList)_rewardsSerializer.Deserialize(reader) ?? new PendingRewardsList();
-                }
-            }
-            catch
-            {
-                return new PendingRewardsList();
-            }
+            return ReadOrBackup<PendingRewardsList>(path, _rewardsSerializer);
         }
 
         public void SaveRewards(PendingRewardsList rewards)
-        {
-            var path = Path.Combine(_pluginDir, "pendingrewards.xml");
-            try
-            {
-                using (var writer = new StreamWriter(path))
-                {
-                    _rewardsSerializer.Serialize(writer, rewards);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[KothBox] Failed to save rewards: {ex.Message}");
-            }
-        }
+            => WriteAtomic(Path.Combine(_pluginDir, "pendingrewards.xml"), _rewardsSerializer, rewards);
 
         // --- Leaderboard ---
         public LeaderboardData LoadLeaderboard()
         {
             var path = Path.Combine(_pluginDir, "kothleaderboard.xml");
-            if (!File.Exists(path))
-                return new LeaderboardData();
-
-            try
-            {
-                using (var reader = new StreamReader(path))
-                {
-                    return (LeaderboardData)_leaderboardSerializer.Deserialize(reader) ?? new LeaderboardData();
-                }
-            }
-            catch
-            {
-                return new LeaderboardData();
-            }
+            return ReadOrBackup<LeaderboardData>(path, _leaderboardSerializer);
         }
 
         public void SaveLeaderboard(LeaderboardData leaderboard)
-        {
-            var path = Path.Combine(_pluginDir, "kothleaderboard.xml");
-            try
-            {
-                using (var writer = new StreamWriter(path))
-                {
-                    _leaderboardSerializer.Serialize(writer, leaderboard);
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[KothBox] Failed to save leaderboard: {ex.Message}");
-            }
-        }
+            => WriteAtomic(Path.Combine(_pluginDir, "kothleaderboard.xml"), _leaderboardSerializer, leaderboard);
 
         // --- Prep Room ---
         public PrepRoomTemplate LoadPrepRoom()
@@ -211,18 +138,7 @@ namespace KothBox
         }
 
         public void SavePrepRoom(PrepRoomTemplate prepRoom)
-        {
-            var path = Path.Combine(_pluginDir, "preproom.xml");
-            try
-            {
-                using (var writer = new StreamWriter(path))
-                    _prepRoomSerializer.Serialize(writer, prepRoom);
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[KothBox] Failed to save prep room: {ex.Message}");
-            }
-        }
+            => WriteAtomic(Path.Combine(_pluginDir, "preproom.xml"), _prepRoomSerializer, prepRoom);
 
         // --- Stash ---
         public string GetStashPath(ulong steamId) => Path.Combine(_pluginDir, "stash", $"{steamId}.dat");
@@ -230,14 +146,11 @@ namespace KothBox
         public void DeleteStash(ulong steamId)
         {
             var path = GetStashPath(steamId);
-            try
+            // Delete the .bak/.tmp too, else a stale backup could "restore" already-returned items.
+            foreach (var p in new[] { path, path + ".bak", path + ".tmp" })
             {
-                if (File.Exists(path))
-                    File.Delete(path);
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[KothBox] Failed to delete stash {steamId}: {ex.Message}");
+                try { if (File.Exists(p)) File.Delete(p); }
+                catch (Exception ex) { Debug.LogError($"[KothBox] Failed to delete stash {steamId}: {ex.Message}"); }
             }
         }
     }

@@ -36,24 +36,33 @@ namespace KothBox
         {
             var stash = new InventoryStash { Items = items };
             var ser = new XmlSerializer(typeof(InventoryStash));
+            // Crash-safe: write temp then atomically swap (a torn stash = the player's real
+            // inventory lost forever, so never write the live file in place).
+            var tmp = path + ".tmp";
             try
             {
-                using (var w = new StreamWriter(path))
+                using (var w = new StreamWriter(tmp))
                     ser.Serialize(w, stash);
+                if (File.Exists(path)) File.Replace(tmp, path, path + ".bak");
+                else File.Move(tmp, path);
             }
-            catch { }
+            catch { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
         }
 
         public static List<ItemSnapshot> Deserialize(string path)
         {
-            if (!File.Exists(path)) return new List<ItemSnapshot>();
             var ser = new XmlSerializer(typeof(InventoryStash));
-            try
+            foreach (var p in new[] { path, path + ".bak" })
             {
-                using (var r = new StreamReader(path))
-                    return ((InventoryStash)ser.Deserialize(r))?.Items ?? new List<ItemSnapshot>();
+                if (!File.Exists(p)) continue;
+                try
+                {
+                    using (var r = new StreamReader(p))
+                        return ((InventoryStash)ser.Deserialize(r))?.Items ?? new List<ItemSnapshot>();
+                }
+                catch { }
             }
-            catch { return new List<ItemSnapshot>(); }
+            return new List<ItemSnapshot>();
         }
     }
 }

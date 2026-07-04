@@ -41,11 +41,18 @@ namespace KothBox
         private uint _eventEntryFee;
         private bool _suppressItemDrops = false;
 
+        // Gacha pool cached in memory + rolled locally, so end-of-event payouts never block the
+        // main thread on MySQL (the freeze risk). Refreshed in the background on load + each stop.
+        private readonly object _gachaLock = new object();
+        private List<GachaPrizeWeighted> _gachaPool;
+        private static readonly System.Random _gachaRng = new System.Random();
+
         // Spectator mode
         private readonly HashSet<ulong> _spectators = new HashSet<ulong>();
         private readonly Dictionary<ulong, Vector3> _spectatorOrigins = new Dictionary<ulong, Vector3>();
         private Vector3? _spectatorSpot;
         private string SpectatorSpotPath => System.IO.Path.Combine(Environment.CurrentDirectory, "Rocket", "Plugins", "KothBox", "spectator_spot.txt");
+
 
         // General item image URL cache (itemId → url from sv_items.image_url), loaded in background.
         internal readonly Dictionary<ushort, string> _itemImageUrls = new Dictionary<ushort, string>();
@@ -70,12 +77,20 @@ namespace KothBox
             _leaderboard = _dataManager.LoadLeaderboard();
             LoadPrepRoom();
 
+            // A crash/reload leaves the in-memory event dead (state resets to Idle) but participants
+            // on disk with cleared inventories. Settle them now: online players are restored, offline
+            // ones parked in OfflinePending for their next reconnect. Never leave stashes orphaned.
+            SettleParticipants();
+            _dataManager.SaveState(_eventState);
+
             try
             {
                 if (Configuration.Instance.Database != null)
                     _coinsDb = new KothCoinsDatabase(Configuration.Instance.Database);
             }
             catch (Exception ex) { Rocket.Core.Logging.Logger.LogException(ex, "[KothBox] coins DB init"); }
+
+            RefreshGachaPool(); // warm the gacha cache so payouts never hit the DB on the main thread
 
             // Cache each loadout's gun name from sv_items (background thread; UI shows real names).
             if (_coinsDb != null)
@@ -246,7 +261,27 @@ namespace KothBox
         {
             if (player?.Player != null) ShowKothButton(player.Player); // floating open-menu button
 
-            var participant = GetParticipant(player.CSteamID.m_SteamID);
+            ulong connSid = player.CSteamID.m_SteamID;
+
+            // Restore a stash left pending from a prior event/crash (they were offline at settle).
+            // Deferred so the player object is fully resolved before we teleport + restore.
+            var pending = _eventState.OfflinePending.FirstOrDefault(p => p.SteamId == connSid);
+            if (pending != null)
+            {
+                var pl = player;
+                Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() =>
+                {
+                    if (RestoreParticipant(pending))
+                    {
+                        _eventState.OfflinePending.Remove(pending);
+                        _dataManager.SaveState(_eventState);
+                        if (pl != null) UnturnedChat.Say(pl, "[PVP] คืน inventory ที่ค้างไว้แล้ว | Restored your pending inventory.", Color.green);
+                    }
+                }, 1.5f);
+                return;
+            }
+
+            var participant = GetParticipant(connSid);
             if (participant == null) return;
 
             bool eventStillRunning = _currentState != EventState.Idle &&
@@ -254,10 +289,19 @@ namespace KothBox
                                      _activeBox != null;
             if (!eventStillRunning)
             {
-                RestoreParticipant(participant);
-                _eventState.Participants.Remove(participant);
-                _dataManager.SaveState(_eventState);
-                UnturnedChat.Say(player, "[PVP] กลับมาแล้ว — คืน inventory แล้ว | Welcome back — inventory restored.", Color.green);
+                // Deferred + only remove the record once the restore actually succeeds, so a
+                // not-yet-ready player object can't drop the record and orphan the stash.
+                var partc = participant;
+                var pl = player;
+                Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() =>
+                {
+                    if (RestoreParticipant(partc))
+                    {
+                        _eventState.Participants.Remove(partc);
+                        _dataManager.SaveState(_eventState);
+                        if (pl != null) UnturnedChat.Say(pl, "[PVP] กลับมาแล้ว — คืน inventory แล้ว | Welcome back — inventory restored.", Color.green);
+                    }
+                }, 1.5f);
                 return;
             }
 
@@ -286,10 +330,12 @@ namespace KothBox
         private void OnServerSpawningItemDrop(Item item, ref Vector3 location, ref bool shouldAllow)
         {
             if (_suppressItemDrops) { shouldAllow = false; return; }
-            if (_activeBox == null) return;
             if (_currentState != EventState.Active && _currentState != EventState.Warmup) return;
-            if (Vector3.Distance(location, _activeBox.GetCenter()) <= _activeBox.Radius)
-                shouldAllow = false;
+            // Block ALL drops while an event is live. Loadout/kit items are real; the old
+            // dome-radius-only guard let players drop kit copies in the prep room (outside the
+            // dome) then reclaim them after /leavekoth = duplication. This is a PVP event —
+            // there are no legitimate item drops while it runs.
+            shouldAllow = false;
         }
 
         // Phase 5 backstop: if a participant actually dies (the damage intercept can miss
@@ -302,8 +348,20 @@ namespace KothBox
             if (_currentState != EventState.Active && _currentState != EventState.Warmup) return;
             try
             {
+                ulong sid = player.CSteamID.m_SteamID;
+                // Block incoming damage immediately so nothing lands while client is mid-respawn
+                _inPrepRoom.Add(sid);
                 player.Player.life.ServerRespawn(false);
-                RespawnInDome(player.Player, participant);
+                // Delay RespawnInDome slightly so the client processes ServerRespawn first,
+                // preventing the death-location flicker from winning.
+                var p = player.Player;
+                var part = participant;
+                var plugin = this;
+                Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() =>
+                {
+                    _inPrepRoom.Remove(sid); // RespawnInDome re-adds it
+                    plugin.RespawnInDome(p, part);
+                }, 0.2f);
             }
             catch (Exception ex) { Rocket.Core.Logging.Logger.LogException(ex, "[KothBox] death backstop"); }
         }
@@ -400,13 +458,20 @@ namespace KothBox
             else
                 box = GetBox(boxName);
 
-            if (box == null) return;
+            if (box == null)
+            {
+                UnturnedChat.Say($"[PVP] ไม่พบ box '{boxName}' | Box '{boxName}' not found.", Color.red);
+                return;
+            }
+
+            // Restore/park any leftover participants from a previous event or crash BEFORE we take
+            // over the list, so their stashes are never orphaned by starting a fresh event.
+            SettleParticipants();
 
             _activeBox = box;
             _currentState = EventState.Warmup;
             _stateTimer = 0;
             _eventState.CurrentBoxId = box.Id;
-            _eventState.Participants.Clear();
             _prizePool = 0;
             _eventEntryFee = Math.Max(Configuration.Instance.EntryFee, fee);
             _eventHostId = hostId;
@@ -427,7 +492,7 @@ namespace KothBox
                 ReturnSpectator(sid);
 
             ClearAllHuds();
-            RestoreAllParticipants();
+            SettleParticipants();                        // restore online, park offline for reconnect
             ClearWall();                                 // remove the barricade ring
             UnloadBoxBuild();                            // remove per-box build if loaded
             DestroyPrepRoom();                           // ลบห้อง prep ออก
@@ -437,9 +502,9 @@ namespace KothBox
             _currentState = EventState.Idle;
             _activeBox = null;
             _eventHostId = 0;
-            _eventState.Participants.Clear();
             _pendingHeal.Clear();
-            _dataManager.SaveState(_eventState);
+            _dataManager.SaveState(_eventState); // SettleParticipants already cleared Participants
+            RefreshGachaPool(); // refresh the cached pool for the next event (background)
 
             UnturnedChat.Say("[PVP] Event หยุดแล้ว | Event stopped.");
         }
@@ -461,6 +526,7 @@ namespace KothBox
             int segments = cfg.ArenaWallSpacing > 0f
                 ? Mathf.Max(12, Mathf.CeilToInt(2f * Mathf.PI * box.Radius / spacing))
                 : Mathf.Max(12, cfg.ArenaWallSegments);
+            segments = Mathf.Min(segments, 2048); // hard cap: never spawn a runaway number of barricades
 
             var center = box.GetCenter();
             float twoPi = Mathf.PI * 2f;
@@ -511,29 +577,36 @@ namespace KothBox
             try { ItemManager.ServerClearItemsInSphere(spawn.Value, 30f); } catch { }
         }
 
-        private void RestoreAllParticipants()
+        // Restore everyone we can and clear the participant list. Players who are OFFLINE (can't
+        // be restored right now) are parked in OfflinePending so their stash is restored on their
+        // next reconnect instead of being orphaned + lost when the list is cleared.
+        private void SettleParticipants()
         {
-            foreach (var participant in _eventState.Participants)
+            foreach (var participant in _eventState.Participants.ToList())
             {
-                RestoreParticipant(participant);
+                if (RestoreParticipant(participant)) continue;
+                if (_eventState.OfflinePending.All(p => p.SteamId != participant.SteamId))
+                    _eventState.OfflinePending.Add(participant);
             }
+            _eventState.Participants.Clear();
         }
 
-        // Teleport back + restore stash for one participant. Idempotent: a missing
-        // stash just means already restored. Safe to call from event-end and reconnect.
-        private void RestoreParticipant(ParticipantData participant)
+        // Teleport back + restore stash for one participant. Returns true if restored (player was
+        // online); false if the player is offline (nothing done — caller must keep them pending).
+        private bool RestoreParticipant(ParticipantData participant)
         {
             // Re-enable Knockdown for them now that they're leaving the arena.
             KothKnockdownBridge.SetOptOut(participant.SteamId, false);
             _awaitingRespawn.Remove(participant.SteamId);
 
             var player = PlayerTool.getPlayer(new CSteamID(participant.SteamId));
-            if (player == null) return;
+            if (player == null) return false;
             ClearPlayerHud(player);
             player.teleportToLocation(participant.GetReturnPos(), player.look?.yaw ?? 0f);
             RestoreInventory(player, participant.StashFile);
             _dataManager.DeleteStash(participant.SteamId);
             _dataManager.DeleteDomeEntry(participant.SteamId);
+            return true;
         }
 
         private void RestoreInventory(Player player, string stashPath)
@@ -643,8 +716,10 @@ namespace KothBox
             float dt = Time.fixedDeltaTime;
 
             // Accrue time for everyone in the event (they're kept inside by ContainParticipants).
+            // Skip participants waiting in prep room during respawn.
             foreach (var participant in _eventState.Participants)
             {
+                if (_inPrepRoom.Contains(participant.SteamId)) continue;
                 participant.CumulativeSeconds += dt;
                 if (participant.CumulativeSeconds >= Configuration.Instance.WinningTime)
                 {
@@ -742,13 +817,14 @@ namespace KothBox
             var center = _activeBox.GetCenter();
             foreach (var participant in _eventState.Participants)
             {
-                // ข้ามคนที่รออยู่ในห้อง prep room (warmup) — อย่า teleport เข้า dome ก่อนเวลา
-                if (_inPrepRoom.Contains(participant.SteamId)) continue;
+                // Warmup เท่านั้น: skip prep room players (ห้อง prep อยู่นอก dome)
+                // Active: contain ทุกคนรวม respawn-wait (ป้องกันวิ่งออกนอกวงระหว่างรอ 3 วิ)
+                if (_currentState == EventState.Warmup && _inPrepRoom.Contains(participant.SteamId)) continue;
 
                 var player = PlayerTool.getPlayer(new CSteamID(participant.SteamId));
                 if (player?.transform == null) continue;
                 if (!IsInDome(player.transform.position))
-                    player.teleportToLocation(center + Vector3.up * 2f, player.look?.yaw ?? 0f);
+                    player.teleportToLocation(GroundSnap(center.x, center.z, center.y), player.look?.yaw ?? 0f);
 
                 // Infinite stamina (no fatigue). serverModifyStamina only sends when not already full.
                 if (player.life != null)
@@ -864,6 +940,33 @@ namespace KothBox
             }
         }
 
+        // Reload the gacha pool into memory on a background thread (DB call must stay off-thread).
+        private void RefreshGachaPool()
+        {
+            if (_coinsDb == null) return;
+            var db = _coinsDb;
+            System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+            {
+                var pool = db.LoadGachaPool();
+                lock (_gachaLock) _gachaPool = pool;
+            });
+        }
+
+        // Weighted draw from the cached pool — pure in-memory, safe on the main thread.
+        // Returns null if the pool hasn't loaded yet / is empty (caller simply skips the prize).
+        private GachaPrize RollGacha()
+        {
+            List<GachaPrizeWeighted> pool;
+            lock (_gachaLock) pool = _gachaPool;
+            if (pool == null || pool.Count == 0) return null;
+            double total = 0;
+            foreach (var e in pool) total += e.Weight;
+            if (total <= 0) return null;
+            double roll = _gachaRng.NextDouble() * total;
+            foreach (var e in pool) { roll -= e.Weight; if (roll <= 0) return e.Prize; }
+            return pool[pool.Count - 1].Prize;
+        }
+
         private void AwardRewards()
         {
             var sorted = _eventState.Participants.OrderByDescending(p => p.CumulativeSeconds).ToList();
@@ -895,21 +998,28 @@ namespace KothBox
                     var pending = _rewards.Rewards.FirstOrDefault(r => r.SteamId == part.SteamId);
                     for (int d = 0; d < draws; d++)
                     {
-                        var prize = _coinsDb.DrawGachaPrize();
+                        var prize = RollGacha();
                         if (prize == null) continue;
                         if (pending == null) { pending = new PendingRewardData { SteamId = part.SteamId }; _rewards.Rewards.Add(pending); }
+                        // Clamp DB-controlled values: amount to [0..int.MaxValue] and ref ids to the
+                        // valid item/vehicle ushort range, so a bad row can't wrap XP negative or grant
+                        // a garbage asset id.
+                        long amt = Math.Max(0, Math.Min(prize.Amount, int.MaxValue));
+                        bool validRef = prize.RefId > 0 && prize.RefId <= ushort.MaxValue;
                         switch (prize.Type)
                         {
                             case "coins":
                             case "meowcoins":
-                                pending.Experience += (uint)prize.Amount;
+                                pending.Experience = (uint)Math.Min((long)pending.Experience + amt, int.MaxValue);
                                 break;
                             case "item":
-                                for (int k = 0; k < Math.Max(1, (int)prize.Amount) && k < 10; k++)
+                                if (!validRef) break;
+                                for (int k = 0; k < Math.Max(1, (int)amt) && k < 10; k++)
                                     pending.ItemIds.Add((ushort)prize.RefId);
                                 gachaCount++;
                                 break;
                             case "vehicle":
+                                if (!validRef) break;
                                 pending.VehicleId = (ushort)prize.RefId;
                                 gachaCount++;
                                 break;
@@ -944,9 +1054,11 @@ namespace KothBox
         // Draw one weighted prize from the shop gacha pool, deliver it, and announce it to all.
         private void AwardGachaToWinner(ulong steamId, string winnerName)
         {
-            var prize = _coinsDb.DrawGachaPrize();
+            var prize = RollGacha();
             if (prize == null) return;
 
+            long amt = Math.Max(0, Math.Min(prize.Amount, int.MaxValue));
+            bool validRef = prize.RefId > 0 && prize.RefId <= ushort.MaxValue;
             switch (prize.Type)
             {
                 case "coins":
@@ -954,16 +1066,18 @@ namespace KothBox
                 {
                     // gacha gave coins/meowcoins → give XP instead
                     var gp = PlayerTool.getPlayer(new CSteamID(steamId));
-                    if (gp?.skills != null) gp.skills.ServerModifyExperience((int)prize.Amount);
-                    else _rewards.Rewards.Add(new PendingRewardData { SteamId = steamId, Experience = (uint)prize.Amount });
+                    if (gp?.skills != null) gp.skills.ServerModifyExperience((int)amt);
+                    else _rewards.Rewards.Add(new PendingRewardData { SteamId = steamId, Experience = (uint)amt });
                     break;
                 }
                 case "item":
+                    if (!validRef) break;
                     var ids = new List<ushort>();
-                    for (int k = 0; k < Math.Max(1, (int)prize.Amount) && k < 10; k++) ids.Add((ushort)prize.RefId);
+                    for (int k = 0; k < Math.Max(1, (int)amt) && k < 10; k++) ids.Add((ushort)prize.RefId);
                     _rewards.Rewards.Add(new PendingRewardData { SteamId = steamId, ItemIds = ids });
                     break;
                 case "vehicle":
+                    if (!validRef) break;
                     _rewards.Rewards.Add(new PendingRewardData { SteamId = steamId, VehicleId = (ushort)prize.RefId });
                     break;
                 // "vip" -> announce only (granted manually / by the VIP system)
@@ -1059,10 +1173,10 @@ namespace KothBox
             }
 
 
-            // Entry fee: deduct XP. Host (event creator) joins free.
-            uint fee = _eventEntryFee;
-            bool isHost = _eventHostId != 0 && steamId == _eventHostId;
-            if (fee > 0 && !isHost)
+            // Entry fee: deduct XP from everyone EXCEPT the host (host gets free entry — matches
+            // StartEvent's design and the warmup-cancel refund which also skips the host).
+            uint fee = (_eventHostId != 0 && steamId == _eventHostId) ? 0u : _eventEntryFee;
+            if (fee > 0)
             {
                 if (player.Experience < fee)
                 {
@@ -1182,27 +1296,34 @@ namespace KothBox
                 return;
             }
 
-            // XP (main thread).
-            if (reward.Experience > 0 && player.Player?.skills != null)
-                player.Player.skills.ServerModifyExperience((int)reward.Experience);
-
-            // Items from the reward tier (full stack/magazine; drops to ground if inventory full).
-            if (reward.ItemIds != null && player.Player != null)
-            {
-                foreach (var id in reward.ItemIds)
-                {
-                    var item = new Item(id, true);
-                    if (!player.Player.inventory.tryAddItem(item, true))
-                        ItemManager.dropItem(item, player.Player.transform.position, false, true, true);
-                }
-            }
-
-            // Vehicle (spawned at the player's feet).
-            if (reward.VehicleId > 0 && player.Player != null)
-                VehicleManager.spawnVehicleV2(reward.VehicleId, player.Player.transform.position + Vector3.up, Quaternion.identity);
-
+            // Consume + persist the reward FIRST. If any delivery step below throws (a bad vehicle
+            // asset id, etc.), the reward is already gone — otherwise it would stay on disk and be
+            // /claimkoth-replayable = unbounded XP/item dupe. Rare loss-on-error beats a dupe.
             _rewards.Rewards.Remove(reward);
             _dataManager.SaveRewards(_rewards);
+
+            try
+            {
+                // XP (main thread). Clamp to int range so a corrupt/huge value can't wrap negative.
+                if (reward.Experience > 0 && player.Player?.skills != null)
+                    player.Player.skills.ServerModifyExperience((int)Math.Min(reward.Experience, int.MaxValue));
+
+                // Items from the reward tier (full stack/magazine; drops to ground if inventory full).
+                if (reward.ItemIds != null && player.Player != null)
+                {
+                    foreach (var id in reward.ItemIds)
+                    {
+                        var item = new Item(id, true);
+                        if (!player.Player.inventory.tryAddItem(item, true))
+                            ItemManager.dropItem(item, player.Player.transform.position, false, true, true);
+                    }
+                }
+
+                // Vehicle (spawned at the player's feet).
+                if (reward.VehicleId > 0 && player.Player != null)
+                    VehicleManager.spawnVehicleV2(reward.VehicleId, player.Player.transform.position + Vector3.up, Quaternion.identity);
+            }
+            catch (Exception ex) { Rocket.Core.Logging.Logger.LogException(ex, "[KothBox] ClaimRewards delivery"); }
 
             UnturnedChat.Say(player, $"[PVP] Claimed:" +
                 (reward.Experience > 0 ? $" {reward.Experience} XP" : "") +
@@ -1266,7 +1387,10 @@ namespace KothBox
 
             _spectatorOrigins[sid] = player.Position;
             _spectators.Add(sid);
-            player.Player.inventory.tryAddItem(new Item(6928, true), true);
+            // Only give the spectator tool if they don't already hold one — else /watchkoth +
+            // /leavespec can be spammed to farm item 6928.
+            if (!InventoryHasItem(player.Player, SpectatorToolId))
+                player.Player.inventory.tryAddItem(new Item(SpectatorToolId, true), true);
             player.Player.teleportToLocation(_spectatorSpot.Value, player.Rotation);
             UnturnedChat.Say(player, "[PVP] โหมดผู้ชม — พิมพ์ /leavespec เพื่อออก", Color.cyan);
         }
@@ -1287,7 +1411,46 @@ namespace KothBox
             {
                 _spectatorOrigins.Remove(sid);
                 var p = PlayerTool.getPlayer(new CSteamID(sid));
-                if (p != null) p.teleportToLocation(origin, p.look?.yaw ?? 0f);
+                if (p != null)
+                {
+                    RemoveItemFromInventory(p, SpectatorToolId); // reclaim the spectator tool
+                    p.teleportToLocation(origin, p.look?.yaw ?? 0f);
+                }
+            }
+        }
+
+        private const ushort SpectatorToolId = 6928;
+
+        private static bool InventoryHasItem(Player p, ushort id)
+        {
+            if (p?.inventory == null) return false;
+            for (byte page = 0; page < PlayerInventory.STORAGE; page++)
+            {
+                var grid = p.inventory.items[page];
+                if (grid == null) continue;
+                byte count = grid.getItemCount();
+                for (byte i = 0; i < count; i++)
+                {
+                    var jar = grid.getItem(i);
+                    if (jar?.item != null && jar.item.id == id) return true;
+                }
+            }
+            return false;
+        }
+
+        private static void RemoveItemFromInventory(Player p, ushort id)
+        {
+            if (p?.inventory == null) return;
+            for (byte page = 0; page < PlayerInventory.STORAGE; page++)
+            {
+                var grid = p.inventory.items[page];
+                if (grid == null) continue;
+                for (int i = grid.getItemCount() - 1; i >= 0; i--)
+                {
+                    var jar = grid.getItem((byte)i);
+                    if (jar?.item != null && jar.item.id == id)
+                        try { grid.removeItem((byte)i); } catch { }
+                }
             }
         }
 
@@ -1301,7 +1464,7 @@ namespace KothBox
         private void OnDamagePlayerRequested(ref DamagePlayerParameters parameters, ref bool shouldAllow)
         {
             var victim = parameters.player;
-            if (victim?.transform == null) return;
+            if (victim?.transform == null || victim.life == null) return;
 
             if (_activeBox == null || _currentState == EventState.Idle) return;
 
@@ -1366,21 +1529,32 @@ namespace KothBox
                 StopEvent();
         }
 
-        // Phase 5: refill HP + stop status effects, re-give kit, teleport inside dome.
+        // Phase 5: warp to dome center first, then refill HP + kit, invincible 3s.
         private void RespawnInDome(Player victim, ParticipantData participant)
         {
             if (_activeBox == null) return;
+
+            // reset kill streak on death; cumulative Kills stays for scoreboard
+            participant.StreakKills = 0;
+            _streakBanner.Remove(participant.SteamId);
+
+            // 1. Warp to dome center first (invincible immediately)
+            ulong sid = participant.SteamId;
+            _inPrepRoom.Add(sid);
+            Vector3 spawnPos = GroundSnap(_activeBox.CenterX, _activeBox.CenterZ, _activeBox.CenterY);
+            victim.teleportToLocation(spawnPos, victim.look?.yaw ?? 0f);
+
+            // 2. Clear items immediately (suppress drops so nothing falls at dome center)
+            _suppressItemDrops = true;
+            try { ClearGrid(victim); StripClothing(victim); ClearGrid(victim); }
+            finally { _suppressItemDrops = false; }
+
+            // 3. Heal + restore kit
             victim.life.serverModifyHealth(100);
             victim.life.serverModifyFood(100);
             victim.life.serverModifyWater(100);
             try { victim.life.serverSetBleeding(false); } catch { }
 
-            // reset kill streak on death; cumulative Kills stays for scoreboard
-            participant.StreakKills = 0;
-            _streakBanner.Remove(participant.SteamId);
-            _inPrepRoom.Remove(participant.SteamId);
-
-            // คืน kit: ถ้าเลือก kit เฉพาะตอน join → ใช้อันเดิม; ไม่งั้น auto-resolve
             if (!string.IsNullOrEmpty(participant.KitPath))
             {
                 var snaps = InventoryStash.Deserialize(participant.KitPath);
@@ -1390,14 +1564,22 @@ namespace KothBox
             else
                 GiveParticipantKit(victim, participant);
 
-            victim.teleportToLocation(RandomDomeSpawn(), victim.look?.yaw ?? 0f);
-
-            // re-show streak panel (in case it cleared on death screen)
-            if (Configuration.Instance.StreakUIEffectId != 0)
-                ShowStreakUI(victim);
-
             var up = UnturnedPlayer.FromPlayer(victim);
-            if (up != null) UnturnedChat.Say(up, "[PVP] ฟื้นคืนชีพ! | Respawned!", Color.cyan);
+            if (up != null) UnturnedChat.Say(up, "[PVP] ฟื้นคืนชีพ! รอ 3 วิ... | Respawned! 3s invincibility.", Color.yellow);
+
+            var plugin = this;
+            Rocket.Core.Utils.TaskDispatcher.QueueOnMainThread(() =>
+            {
+                _inPrepRoom.Remove(sid);
+                if (plugin._currentState != EventState.Active) return;
+                if (plugin.GetParticipant(sid) == null) return;
+                var p = PlayerTool.getPlayer(new CSteamID(sid));
+                if (p == null) return;
+                var upl = UnturnedPlayer.FromPlayer(p);
+                if (upl != null) UnturnedChat.Say(upl, "[PVP] สู้เลย! | Go fight!", Color.cyan);
+                if (Configuration.Instance.StreakUIEffectId != 0)
+                    plugin.ShowStreakUI(p);
+            }, 3f);
         }
 
         // Phase 7: killfeed + streak.
